@@ -419,6 +419,40 @@ CieRecord *EhFrameSection::addCie(EhSectionPiece &cie, ArrayRef<RelTy> rels) {
     rec->cie = &cie;
     cieRecords.push_back(rec);
   }
+  if (ctx.arg.emachine == EM_LOONGARCH && ctx.arg.is64 && ctx.arg.isPic &&
+      (cast<ObjFile<ELFT>>(cie.sec->file)->getObj().getHeader().e_flags &
+       EF_LOONGARCH_OBJABI_MASK) == 0) {
+    CieEncodings encodings;
+    getFdeEncoding(&cie, &encodings);
+    auto isAbsolute64 = [](uint8_t encoding) {
+      uint8_t format = encoding & ~DW_EH_PE_indirect;
+      return format == DW_EH_PE_absptr || format == DW_EH_PE_udata8 ||
+             format == DW_EH_PE_sdata8;
+    };
+    if (encodings.fdeEncodingOffset != 0 &&
+        encodings.fdeEncodingOffset < cie.size &&
+        !(encodings.fdeEncoding & DW_EH_PE_indirect) &&
+        isAbsolute64(encodings.fdeEncoding))
+      rec->convertedEncodingOffset = encodings.fdeEncodingOffset;
+    if (encodings.lsdaEncodingOffset != 0 &&
+        encodings.lsdaEncodingOffset < cie.size &&
+        isAbsolute64(encodings.lsdaEncoding)) {
+      rec->convertedLsdaEncodingOffset = encodings.lsdaEncodingOffset;
+      rec->convertedLsdaEncoding =
+          DW_EH_PE_pcrel | DW_EH_PE_sdata8 |
+          (encodings.lsdaEncoding & DW_EH_PE_indirect);
+    }
+    if (encodings.personalityEncodingOffset != 0 &&
+        encodings.personalityOffset + 8 <= cie.size &&
+        isAbsolute64(encodings.personalityEncoding)) {
+      rec->convertedPersonalityEncodingOffset =
+          encodings.personalityEncodingOffset;
+      rec->convertedPersonalityOffset = encodings.personalityOffset;
+      rec->convertedPersonalityEncoding =
+          DW_EH_PE_pcrel | DW_EH_PE_sdata8 |
+          (encodings.personalityEncoding & DW_EH_PE_indirect);
+    }
+  }
   return rec;
 }
 
@@ -550,10 +584,17 @@ void EhFrameSection::finalizeContents() {
 
   size_t off = 0;
   for (CieRecord *rec : cieRecords) {
+    rec->cie->personalityPcRelativeOffset = rec->convertedPersonalityOffset;
     rec->cie->outputOff = off;
     off += rec->cie->size;
 
+    uint8_t fdeEncoding = rec->convertedLsdaEncodingOffset
+                              ? getFdeEncoding(rec->cie)
+                              : static_cast<uint8_t>(DW_EH_PE_absptr);
     for (EhSectionPiece *fde : rec->fdes) {
+      fde->fdePcRelative = rec->convertedEncodingOffset != 0;
+      if (rec->convertedLsdaEncodingOffset)
+        fde->lsdaPcRelativeOffset = getFdeLsdaOffset(fde, fdeEncoding);
       fde->outputOff = off;
       off += fde->size;
     }
@@ -577,7 +618,9 @@ SmallVector<EhFrameSection::FdeData, 0> EhFrameSection::getFdeData() const {
 
   uint64_t va = getPartition(ctx).ehFrameHdr->getVA();
   for (CieRecord *rec : cieRecords) {
-    uint8_t enc = getFdeEncoding(rec->cie);
+    uint8_t enc = rec->convertedEncodingOffset
+                      ? DW_EH_PE_pcrel | DW_EH_PE_sdata8
+                      : getFdeEncoding(rec->cie);
     for (EhSectionPiece *fde : rec->fdes) {
       uint64_t pc = getFdePc(buf, fde->outputOff, enc);
       uint64_t fdeVA = getParent()->addr + fde->outputOff;
@@ -647,6 +690,15 @@ void EhFrameSection::writeTo(uint8_t *buf) {
   for (CieRecord *rec : cieRecords) {
     size_t cieOffset = rec->cie->outputOff;
     writeCieFde(ctx, buf + cieOffset, rec->cie->data());
+    if (rec->convertedEncodingOffset)
+      buf[cieOffset + rec->convertedEncodingOffset] =
+          DW_EH_PE_pcrel | DW_EH_PE_sdata8;
+    if (rec->convertedLsdaEncodingOffset)
+      buf[cieOffset + rec->convertedLsdaEncodingOffset] =
+          rec->convertedLsdaEncoding;
+    if (rec->convertedPersonalityEncodingOffset)
+      buf[cieOffset + rec->convertedPersonalityEncodingOffset] =
+          rec->convertedPersonalityEncoding;
 
     for (EhSectionPiece *fde : rec->fdes) {
       size_t off = fde->outputOff;

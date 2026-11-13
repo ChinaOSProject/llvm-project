@@ -200,7 +200,8 @@ bool lld::elf::needsGot(RelExpr expr) {
                RE_MIPS_GOT_LOCAL_PAGE, RE_MIPS_GOT_OFF, RE_MIPS_GOT_OFF32,
                RE_AARCH64_GOT_PAGE_PC, RE_AARCH64_AUTH_GOT_PAGE_PC,
                RE_AARCH64_AUTH_GOT_PAGE_PC, R_GOT_PC, R_GOTPLT,
-               RE_AARCH64_GOT_PAGE, RE_LOONGARCH_GOT, RE_LOONGARCH_GOT_PAGE_PC>(
+               RE_AARCH64_GOT_PAGE, RE_LOONGARCH_GOT, RE_LOONGARCH_GOT_PAGE_PC,
+               RE_LOONGARCH_SOP_GOTREL>(
       expr);
 }
 
@@ -983,7 +984,8 @@ bool RelocationScanner::isStaticLinkTimeConstant(RelExpr e, RelType type,
           R_GOTPLT_GOTREL, R_GOTPLT_PC, RE_PPC32_PLTREL, RE_PPC64_CALL_PLT,
           RE_PPC64_RELAX_TOC, RE_RISCV_ADD, RE_AARCH64_GOT_PAGE,
           RE_AARCH64_AUTH_GOT, RE_AARCH64_AUTH_GOT_PC, RE_LOONGARCH_PLT_PAGE_PC,
-          RE_LOONGARCH_GOT, RE_LOONGARCH_GOT_PAGE_PC>(e))
+          RE_LOONGARCH_GOT, RE_LOONGARCH_GOT_PAGE_PC, RE_LOONGARCH_SOP_ABS,
+          RE_LOONGARCH_SOP_GOTREL>(e))
     return true;
 
   // These never do, except if the entire file is position dependent or if
@@ -1519,6 +1521,28 @@ void RelocationScanner::scanOne(typename Relocs<RelTy>::const_iterator &i) {
 
   RelExpr expr =
       ctx.target->getRelExpr(type, sym, sec->content().data() + offset);
+  if (ctx.arg.emachine == EM_LOONGARCH && type == R_LARCH_64) {
+    if (auto *eh = dyn_cast<EhInputSection>(sec)) {
+      auto findPiece = [&](ArrayRef<EhSectionPiece> pieces)
+          -> const EhSectionPiece * {
+        auto piece = llvm::upper_bound(
+            pieces, rel.r_offset,
+            [](uint64_t off, const EhSectionPiece &entry) {
+              return off < entry.inputOff;
+            });
+        return piece == pieces.begin() ? nullptr : &*--piece;
+      };
+      if (const EhSectionPiece *cie = findPiece(eh->cies))
+        if (cie->personalityPcRelativeOffset &&
+            rel.r_offset == cie->inputOff + cie->personalityPcRelativeOffset)
+          expr = R_PC;
+      if (const EhSectionPiece *fde = findPiece(eh->fdes))
+        if ((fde->fdePcRelative && rel.r_offset == fde->inputOff + 8) ||
+            (fde->lsdaPcRelativeOffset &&
+             rel.r_offset == fde->inputOff + fde->lsdaPcRelativeOffset))
+          expr = R_PC;
+    }
+  }
   int64_t addend = RelTy::HasAddend
                        ? getAddend<ELFT>(rel)
                        : ctx.target->getImplicitAddend(

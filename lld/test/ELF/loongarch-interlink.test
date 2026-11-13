@@ -3,6 +3,7 @@
 
 # RUN: yaml2obj %t/blob.yaml -o %t/blob.o
 # RUN: yaml2obj %t/v0-lp64d.yaml -o %t/v0-lp64d.o
+# RUN: %python %S/Inputs/loongarch-set-flags.py %t/v0-lp64d.o %t/v2-lp64d.o 0x83
 # RUN: llvm-mc --filetype=obj --triple=loongarch64-unknown-gnu %t/start.s -o %t/v1-lp64d.o
 # RUN: llvm-mc --filetype=obj --triple=loongarch64-unknown-gnusf %t/start.s -o %t/v1-lp64s.o
 # RUN: llvm-mc --filetype=obj --triple=loongarch64-unknown-gnu %t/bar.s -o %t/v1-b-lp64d.o
@@ -28,8 +29,15 @@
 # RUN: not ld.lld %t/v1-lp64s.o %t/v1-b-lp64d.o -o /dev/null 2>&1 | FileCheck -DFILE1=%t/v1-b-lp64d.o -DFILE2=%t/v1-lp64s.o --check-prefix=INTERLINK-ERR %s
 # INTERLINK-ERR: error: [[FILE1]]: cannot link object files with different ABI from [[FILE2]]
 
-## Check that interlink between different object ABI versions is disallowed.
-# RUN: not ld.lld %t/v0-lp64d.o %t/v1-b-lp64d.o %t/blob.o -o /dev/null 2>&1 | FileCheck -DFILE=%t/v0-lp64d.o --check-prefix=VERSION-ERR %s
+## 检查 ABI v0 与 ABI v1 混合链接时的标志，覆盖两种输入顺序。
+# RUN: ld.lld -e 0 %t/v0-lp64d.o %t/v1-b-lp64d.o %t/blob.o -o %t/v0-mixed.out
+# RUN: ld.lld -e 0 %t/v1-b-lp64d.o %t/v0-lp64d.o %t/blob.o -o %t/v0-reversed.out
+# RUN: llvm-readobj -h %t/v0-mixed.out | FileCheck --check-prefix=V0-LP64D %s
+# RUN: llvm-readobj -h %t/v0-reversed.out | FileCheck --check-prefix=V0-LP64D %s
+# V0-LP64D: Flags [ (0x3)
+
+## 检查未支持的对象 ABI 版本。
+# RUN: not ld.lld %t/v2-lp64d.o %t/v1-b-lp64d.o %t/blob.o -o /dev/null 2>&1 | FileCheck -DFILE=%t/v2-lp64d.o --check-prefix=VERSION-ERR %s
 # VERSION-ERR: error: [[FILE]]: unsupported object file ABI version
 
 #--- blob.bin

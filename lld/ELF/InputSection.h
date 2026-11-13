@@ -388,6 +388,9 @@ struct EhSectionPiece {
   InputSectionBase *sec;
   uint32_t size;
   unsigned firstRelocation;
+  bool fdePcRelative = false;
+  uint32_t personalityPcRelativeOffset = 0;
+  uint32_t lsdaPcRelativeOffset = 0;
 };
 
 // This corresponds to a .eh_frame section of an input file.

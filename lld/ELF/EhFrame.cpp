@@ -22,6 +22,7 @@
 #include "Relocations.h"
 #include "Target.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/Support/DataExtractor.h"
 
 using namespace llvm;
 using namespace llvm::ELF;
@@ -33,8 +34,9 @@ using namespace lld::elf;
 namespace {
 class EhReader {
 public:
-  EhReader(InputSectionBase *s, ArrayRef<uint8_t> d) : isec(s), d(d) {}
-  uint8_t getFdeEncoding();
+  EhReader(InputSectionBase *s, ArrayRef<uint8_t> d)
+      : isec(s), d(d), start(d.data()) {}
+  uint8_t getFdeEncoding(CieEncodings *encodings = nullptr);
   bool hasLSDA();
 
 private:
@@ -48,11 +50,12 @@ private:
   void skipBytes(size_t count);
   StringRef readString();
   void skipLeb128();
-  void skipAugP();
+  void skipAugP(CieEncodings *encodings = nullptr);
   StringRef getAugmentation();
 
   InputSectionBase *isec;
   ArrayRef<uint8_t> d;
+  const uint8_t *start;
 };
 }
 
@@ -119,8 +122,14 @@ static size_t getAugPSize(Ctx &ctx, unsigned enc) {
   return 0;
 }
 
-void EhReader::skipAugP() {
+void EhReader::skipAugP(CieEncodings *encodings) {
+  uint32_t encodingOffset = d.data() - start;
   uint8_t enc = readByte();
+  if (encodings) {
+    encodings->personalityEncodingOffset = encodingOffset;
+    encodings->personalityEncoding = enc;
+    encodings->personalityOffset = d.data() - start;
+  }
   if ((enc & 0xf0) == DW_EH_PE_aligned)
     return errOn(d.data() - 1, "DW_EH_PE_aligned encoding is not supported");
   size_t size = getAugPSize(isec->getCtx(), enc);
@@ -131,8 +140,24 @@ void EhReader::skipAugP() {
   d = d.slice(size);
 }
 
-uint8_t elf::getFdeEncoding(EhSectionPiece *p) {
-  return EhReader(p->sec, p->data()).getFdeEncoding();
+uint8_t elf::getFdeEncoding(EhSectionPiece *p, CieEncodings *encodings) {
+  return EhReader(p->sec, p->data()).getFdeEncoding(encodings);
+}
+
+uint32_t elf::getFdeLsdaOffset(EhSectionPiece *p, uint8_t encoding) {
+  Ctx &ctx = p->sec->getCtx();
+  DataExtractor data(p->data(), ctx.arg.isLE, ctx.arg.wordsize);
+  DataExtractor::Cursor cursor(8 + 2 * getAugPSize(ctx, encoding));
+  uint64_t augmentationSize = data.getULEB128(cursor);
+  if (Error error = cursor.takeError())
+    Fatal(ctx) << p->sec << ": invalid FDE augmentation: "
+               << toString(std::move(error));
+  if (augmentationSize == 0)
+    return 0;
+  if (augmentationSize < ctx.arg.wordsize ||
+      !data.isValidOffsetForDataOfSize(cursor.tell(), augmentationSize))
+    Fatal(ctx) << p->sec << ": invalid FDE augmentation size";
+  return cursor.tell();
 }
 
 bool elf::hasLSDA(const EhSectionPiece &p) {
@@ -163,26 +188,34 @@ StringRef EhReader::getAugmentation() {
   return aug;
 }
 
-uint8_t EhReader::getFdeEncoding() {
-  // We only care about an 'R' value, but other records may precede an 'R'
-  // record. Unfortunately records are not in TLV (type-length-value) format,
-  // so we need to teach the linker how to skip records for each type.
+uint8_t EhReader::getFdeEncoding(CieEncodings *encodings) {
+  // 读取地址编码，需要元数据时同时记录各字段的位置。
   StringRef aug = getAugmentation();
+  uint8_t fdeEncoding = DW_EH_PE_absptr;
   for (char c : aug) {
-    if (c == 'R')
-      return readByte();
-    if (c == 'z')
+    if (c == 'R') {
+      if (!encodings)
+        return readByte();
+      encodings->fdeEncodingOffset = d.data() - start;
+      fdeEncoding = readByte();
+      encodings->fdeEncoding = fdeEncoding;
+    } else if (c == 'z')
       skipLeb128();
-    else if (c == 'L')
-      readByte();
-    else if (c == 'P')
-      skipAugP();
+    else if (c == 'L') {
+      uint32_t encodingOffset = d.data() - start;
+      uint8_t encoding = readByte();
+      if (encodings) {
+        encodings->lsdaEncodingOffset = encodingOffset;
+        encodings->lsdaEncoding = encoding;
+      }
+    } else if (c == 'P')
+      skipAugP(encodings);
     else if (c != 'B' && c != 'S' && c != 'G') {
       errOn(aug.data(), "unknown .eh_frame augmentation string: " + aug);
       break;
     }
   }
-  return DW_EH_PE_absptr;
+  return fdeEncoding;
 }
 
 bool EhReader::hasLSDA() {

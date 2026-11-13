@@ -12,6 +12,7 @@
 #include "SyntheticSections.h"
 #include "Target.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LEB128.h"
 
 using namespace llvm;
@@ -22,6 +23,28 @@ using namespace lld;
 using namespace lld::elf;
 
 namespace {
+// ABI v0 SOP 操作基于 Loongnix 已发布的实现。
+// 原实现按照 University of Illinois Open Source License 发布。
+struct RelStack {
+  static constexpr unsigned capacity = 16;
+  uint64_t stack[capacity] = {};
+  int top = -1;
+
+  void push_back(uint64_t value) {
+    if (top + 1 >= static_cast<int>(capacity))
+      report_fatal_error("LoongArch SOP operand overflow");
+    stack[++top] = value;
+  }
+
+  uint64_t pop_back_val() {
+    if (top < 0)
+      report_fatal_error("LoongArch SOP operand underflow");
+    return stack[top--];
+  }
+};
+
+thread_local RelStack relStack;
+
 class LoongArch final : public TargetInfo {
 public:
   LoongArch(Ctx &);
@@ -277,23 +300,11 @@ uint32_t LoongArch::calcEFlags() const {
                      << ": cannot link object files with different ABI from "
                      << targetFile;
 
-    // We cannot process psABI v1.x / object ABI v0 files (containing stack
-    // relocations), unlike ld.bfd.
-    //
-    // Instead of blindly accepting every v0 object and only failing at
-    // relocation processing time, just disallow interlink altogether. We
-    // don't expect significant usage of object ABI v0 in the wild (the old
-    // world may continue using object ABI v0 for a while, but as it's not
-    // binary-compatible with the upstream i.e. new-world ecosystem, it's not
-    // being considered here).
-    //
-    // There are briefly some new-world systems with object ABI v0 binaries too.
-    // It is because these systems were built before the new ABI was finalized.
-    // These are not supported either due to the extremely small number of them,
-    // and the few impacted users are advised to simply rebuild world or
-    // reinstall a recent system.
-    if ((flags & EF_LOONGARCH_OBJABI_MASK) != EF_LOONGARCH_OBJABI_V1)
+    uint32_t objAbi = flags & EF_LOONGARCH_OBJABI_MASK;
+    if (objAbi != 0 && objAbi != EF_LOONGARCH_OBJABI_V1)
       ErrAlways(ctx) << f << ": unsupported object file ABI version";
+    if (objAbi == 0)
+      target &= ~EF_LOONGARCH_OBJABI_MASK;
   }
 
   return target;
@@ -407,7 +418,41 @@ RelExpr LoongArch::getRelExpr(const RelType type, const Symbol &s,
   case R_LARCH_NONE:
   case R_LARCH_MARK_LA:
   case R_LARCH_MARK_PCREL:
+  case R_LARCH_GNU_VTINHERIT:
+  case R_LARCH_GNU_VTENTRY:
     return R_NONE;
+  case R_LARCH_SOP_PUSH_PCREL:
+    return R_PC;
+  case R_LARCH_SOP_PUSH_TLS_GOT:
+    return R_GOT_OFF;
+  case R_LARCH_SOP_PUSH_TLS_GD:
+    return R_TLSGD_GOT;
+  case R_LARCH_SOP_PUSH_TLS_TPREL:
+    return R_TPREL;
+  case R_LARCH_SOP_PUSH_GPREL:
+    return RE_LOONGARCH_SOP_GOTREL;
+  case R_LARCH_SOP_PUSH_PLT_PCREL:
+    return R_PLT_PC;
+  case R_LARCH_SOP_PUSH_ABSOLUTE:
+  case R_LARCH_SOP_PUSH_DUP:
+  case R_LARCH_SOP_ASSERT:
+  case R_LARCH_SOP_NOT:
+  case R_LARCH_SOP_SUB:
+  case R_LARCH_SOP_SL:
+  case R_LARCH_SOP_SR:
+  case R_LARCH_SOP_ADD:
+  case R_LARCH_SOP_AND:
+  case R_LARCH_SOP_IF_ELSE:
+  case R_LARCH_SOP_POP_32_S_10_5:
+  case R_LARCH_SOP_POP_32_U_10_12:
+  case R_LARCH_SOP_POP_32_S_10_12:
+  case R_LARCH_SOP_POP_32_S_10_16:
+  case R_LARCH_SOP_POP_32_S_10_16_S2:
+  case R_LARCH_SOP_POP_32_S_5_20:
+  case R_LARCH_SOP_POP_32_S_0_5_10_16_S2:
+  case R_LARCH_SOP_POP_32_S_0_10_10_16_S2:
+  case R_LARCH_SOP_POP_32_U:
+    return RE_LOONGARCH_SOP_ABS;
   case R_LARCH_32:
   case R_LARCH_64:
   case R_LARCH_ABS_HI20:
@@ -541,14 +586,6 @@ RelExpr LoongArch::getRelExpr(const RelType type, const Symbol &s,
   case R_LARCH_TLS_DESC_PCREL20_S2:
     return R_TLSDESC_PC;
 
-  // Other known relocs that are explicitly unimplemented:
-  //
-  // - psABI v1 relocs that need a stateful stack machine to work, and not
-  //   required when implementing psABI v2;
-  // - relocs that are not used anywhere (R_LARCH_{ADD,SUB}_24 [1], and the
-  //   two GNU vtable-related relocs).
-  //
-  // [1]: https://web.archive.org/web/20230709064026/https://github.com/loongson/LoongArch-Documentation/issues/51
   default:
     Err(ctx) << getErrorLoc(ctx, loc) << "unknown relocation (" << type.v
              << ") against symbol " << &s;
@@ -573,6 +610,112 @@ bool LoongArch::usesOnlyLowPageBits(RelType type) const {
 void LoongArch::relocate(uint8_t *loc, const Relocation &rel,
                          uint64_t val) const {
   switch (rel.type) {
+  case R_LARCH_SOP_PUSH_PCREL:
+  case R_LARCH_SOP_PUSH_ABSOLUTE:
+  case R_LARCH_SOP_PUSH_GPREL:
+  case R_LARCH_SOP_PUSH_TLS_TPREL:
+  case R_LARCH_SOP_PUSH_TLS_GOT:
+  case R_LARCH_SOP_PUSH_TLS_GD:
+  case R_LARCH_SOP_PUSH_PLT_PCREL:
+    relStack.push_back(val);
+    return;
+  case R_LARCH_SOP_PUSH_DUP: {
+    uint64_t operand = relStack.pop_back_val();
+    relStack.push_back(operand);
+    relStack.push_back(operand);
+    return;
+  }
+  case R_LARCH_SOP_ASSERT:
+    if (relStack.pop_back_val() == 0)
+      report_fatal_error("LoongArch SOP assertion failed");
+    return;
+  case R_LARCH_SOP_NOT:
+    relStack.push_back(!relStack.pop_back_val());
+    return;
+  case R_LARCH_SOP_SUB: {
+    uint64_t operand2 = relStack.pop_back_val();
+    uint64_t operand1 = relStack.pop_back_val();
+    relStack.push_back(operand1 - operand2);
+    return;
+  }
+  case R_LARCH_SOP_SL:
+  case R_LARCH_SOP_SR: {
+    uint64_t amount = relStack.pop_back_val();
+    uint64_t operand = relStack.pop_back_val();
+    if (amount >= 64)
+      report_fatal_error("LoongArch SOP shift count is out of range");
+    relStack.push_back(rel.type == R_LARCH_SOP_SL
+                           ? operand << amount
+                           : static_cast<int64_t>(operand) >> amount);
+    return;
+  }
+  case R_LARCH_SOP_ADD: {
+    uint64_t operand2 = relStack.pop_back_val();
+    uint64_t operand1 = relStack.pop_back_val();
+    relStack.push_back(operand1 + operand2);
+    return;
+  }
+  case R_LARCH_SOP_AND: {
+    uint64_t operand2 = relStack.pop_back_val();
+    uint64_t operand1 = relStack.pop_back_val();
+    relStack.push_back(operand1 & operand2);
+    return;
+  }
+  case R_LARCH_SOP_IF_ELSE: {
+    uint64_t operand3 = relStack.pop_back_val();
+    uint64_t operand2 = relStack.pop_back_val();
+    uint64_t operand1 = relStack.pop_back_val();
+    relStack.push_back(operand1 ? operand2 : operand3);
+    return;
+  }
+  case R_LARCH_SOP_POP_32_S_10_5:
+    val = relStack.pop_back_val();
+    checkInt(ctx, loc, val, 5, rel);
+    write32le(loc, (read32le(loc) & ~(0x1f << 10)) | ((val & 0x1f) << 10));
+    return;
+  case R_LARCH_SOP_POP_32_U_10_12:
+    val = relStack.pop_back_val();
+    checkUInt(ctx, loc, val, 12, rel);
+    write32le(loc, setK12(read32le(loc), val));
+    return;
+  case R_LARCH_SOP_POP_32_S_10_12:
+    val = relStack.pop_back_val();
+    checkInt(ctx, loc, val, 12, rel);
+    write32le(loc, setK12(read32le(loc), val));
+    return;
+  case R_LARCH_SOP_POP_32_S_10_16:
+    val = relStack.pop_back_val();
+    checkInt(ctx, loc, val, 16, rel);
+    write32le(loc, setK16(read32le(loc), val));
+    return;
+  case R_LARCH_SOP_POP_32_S_10_16_S2:
+    val = relStack.pop_back_val();
+    checkInt(ctx, loc, val, 18, rel);
+    checkAlignment(ctx, loc, val, 4, rel);
+    write32le(loc, setK16(read32le(loc), val >> 2));
+    return;
+  case R_LARCH_SOP_POP_32_S_5_20:
+    val = relStack.pop_back_val();
+    checkInt(ctx, loc, val, 20, rel);
+    write32le(loc, setJ20(read32le(loc), val));
+    return;
+  case R_LARCH_SOP_POP_32_S_0_5_10_16_S2:
+    val = relStack.pop_back_val();
+    checkInt(ctx, loc, val, 23, rel);
+    checkAlignment(ctx, loc, val, 4, rel);
+    write32le(loc, setD5k16(read32le(loc), val >> 2));
+    return;
+  case R_LARCH_SOP_POP_32_S_0_10_10_16_S2:
+    val = relStack.pop_back_val();
+    checkInt(ctx, loc, val, 28, rel);
+    checkAlignment(ctx, loc, val, 4, rel);
+    write32le(loc, setD10k16(read32le(loc), val >> 2));
+    return;
+  case R_LARCH_SOP_POP_32_U:
+    val = relStack.pop_back_val();
+    checkUInt(ctx, loc, val, 32, rel);
+    write32le(loc, val);
+    return;
   case R_LARCH_32_PCREL:
     checkInt(ctx, loc, val, 32, rel);
     [[fallthrough]];
@@ -1271,6 +1414,7 @@ static bool pairForGotRels(ArrayRef<Relocation> relocs) {
 }
 
 void LoongArch::relocateAlloc(InputSectionBase &sec, uint8_t *buf) const {
+  relStack.top = -1;
   const unsigned bits = ctx.arg.is64 ? 64 : 32;
   uint64_t secAddr = sec.getOutputSection()->addr;
   if (auto *s = dyn_cast<InputSection>(&sec))
@@ -1386,6 +1530,8 @@ void LoongArch::relocateAlloc(InputSectionBase &sec, uint8_t *buf) const {
     }
     relocate(loc, rel, val);
   }
+  if (relStack.top != -1)
+    report_fatal_error("LoongArch SOP expression is incomplete");
 }
 
 // When relaxing just R_LARCH_ALIGN, relocDeltas is usually changed only once in
