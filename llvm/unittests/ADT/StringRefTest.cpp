@@ -552,6 +552,32 @@ TEST(StringRefTest, Find) {
   EXPECT_EQ(0U, Str.rfind("hello"));
   EXPECT_EQ(1U, Str.rfind("ello"));
   EXPECT_EQ(StringRef::npos, Str.rfind("zz"));
+  EXPECT_EQ(10U, Str.rfind(""));
+  EXPECT_EQ(4U, Str.rfind("o"));
+  EXPECT_EQ(3U, Str.rfind("lo"));
+  EXPECT_EQ(StringRef::npos, Str.rfind("hellp"));
+  EXPECT_EQ(0U, StringRef().rfind(""));
+  EXPECT_EQ(StringRef::npos, StringRef().rfind("a"));
+  EXPECT_EQ(4U, StringRef("aaaaaa").rfind("aa"));
+  EXPECT_EQ(3U, StringRef("abababa").rfind("bab"));
+  EXPECT_EQ(StringRef::npos, StringRef("abcabcab").rfind("abd"));
+  EXPECT_EQ(3U, StringRef("foo.llvm.123").rfind(".llvm."));
+  EXPECT_EQ(StringRef::npos, StringRef("foo.llvm").rfind(".llvm."));
+
+  // Long haystacks are searched 16 bytes at a time. Place two candidates at
+  // every pair of positions, so that the last match, and a candidate that
+  // fails to match, fall on either side of each chunk boundary.
+  for (size_t Len = 0; Len != 50; ++Len)
+    for (size_t I = 0; I < Len; ++I)
+      for (size_t J = I; J < Len; ++J) {
+        std::string H(Len, 'x');
+        H[I] = '.';
+        H[J] = '.';
+        if (I + 1 < Len && I + 1 != J)
+          H[I + 1] = 'y';
+        for (StringRef N : {".", ".y", ".x", "x.", "y"})
+          EXPECT_EQ(H.rfind(N), StringRef(H).rfind(N)) << H << " " << N;
+      }
 
   EXPECT_EQ(8U, Str.rfind_insensitive('l'));
   EXPECT_EQ(8U, Str.rfind_insensitive('L'));
