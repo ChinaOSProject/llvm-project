@@ -388,6 +388,20 @@ struct EhSectionPiece {
   InputSectionBase *sec;
   uint32_t size;
   unsigned firstRelocation;
+  // Insertions into an old CIE/FDE, expressed in input-record coordinates.
+  SmallVector<std::pair<uint32_t, uint32_t>, 0> insertedBytes;
+  uint32_t getOutputOffset(uint32_t offset) const {
+    uint32_t result = offset;
+    for (auto [pos, count] : insertedBytes)
+      if (offset >= pos)
+        result += count;
+    return result;
+  }
+  uint32_t getOutputSize() const {
+    if (insertedBytes.empty())
+      return size;
+    return (getOutputOffset(size) + 7) & ~7U;
+  }
   bool fdePcRelative = false;
   uint32_t personalityPcRelativeOffset = 0;
   uint32_t lsdaPcRelativeOffset = 0;

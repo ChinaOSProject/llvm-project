@@ -191,6 +191,10 @@ StringRef EhReader::getAugmentation() {
 uint8_t EhReader::getFdeEncoding(CieEncodings *encodings) {
   // 读取地址编码，需要元数据时同时记录各字段的位置。
   StringRef aug = getAugmentation();
+  if (encodings) {
+    encodings->augmentation = aug;
+    encodings->augmentationSizeOffset = d.data() - start;
+  }
   uint8_t fdeEncoding = DW_EH_PE_absptr;
   for (char c : aug) {
     if (c == 'R') {
@@ -199,9 +203,21 @@ uint8_t EhReader::getFdeEncoding(CieEncodings *encodings) {
       encodings->fdeEncodingOffset = d.data() - start;
       fdeEncoding = readByte();
       encodings->fdeEncoding = fdeEncoding;
-    } else if (c == 'z')
-      skipLeb128();
-    else if (c == 'L') {
+    } else if (c == 'z') {
+      DataExtractor data(d, isec->getCtx().arg.isLE, 0);
+      DataExtractor::Cursor cursor(0);
+      uint64_t size = data.getULEB128(cursor);
+      if (Error error = cursor.takeError()) {
+        errOn(d.data(), "invalid CIE augmentation size");
+        consumeError(std::move(error));
+        return fdeEncoding;
+      }
+      skipBytes(cursor.tell());
+      if (encodings) {
+        encodings->augmentationSize = size;
+        encodings->augmentationDataOffset = d.data() - start;
+      }
+    } else if (c == 'L') {
       uint32_t encodingOffset = d.data() - start;
       uint8_t encoding = readByte();
       if (encodings) {

@@ -438,7 +438,7 @@ public:
     // Offset -1 means that the piece is dead (i.e. garbage collected).
     if (it[-1].outputOff == -1)
       return -1;
-    return it[-1].outputOff + (off - it[-1].inputOff);
+    return it[-1].outputOff + it[-1].getOutputOffset(off - it[-1].inputOff);
   }
 
 private:

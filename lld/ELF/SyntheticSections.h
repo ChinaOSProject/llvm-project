@@ -45,6 +45,8 @@ class SymbolTableBaseSection;
 struct CieRecord {
   EhSectionPiece *cie = nullptr;
   SmallVector<EhSectionPiece *, 0> fdes;
+  SmallVector<uint8_t, 0> convertedCie;
+  bool addedAugmentationSize = false;
   uint32_t convertedEncodingOffset = 0;
   uint32_t convertedLsdaEncodingOffset = 0;
   uint32_t convertedPersonalityEncodingOffset = 0;

@@ -1,0 +1,438 @@
+# REQUIRES: loongarch
+# RUN: split-file %s %t
+# Old LP64D objects may omit R entirely, implying absolute FDE addresses.
+# PIC links must add a real encoding, preserving CFI and augmentation pointers.
+# RUN: yaml2obj %t/empty.yaml -o %t/empty.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/empty.o -o %t/empty.so
+# RUN: llvm-readobj --relocations %t/empty.so | FileCheck %s --check-prefix=RELOCS
+# RUN: llvm-dwarfdump --eh-frame %t/empty.so | FileCheck %s --check-prefix=FRAME
+# RUN: yaml2obj %t/z.yaml -o %t/z.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/z.o -o %t/z.so
+# RUN: llvm-readobj --relocations %t/z.so | FileCheck %s --check-prefix=RELOCS
+# RUN: llvm-dwarfdump --eh-frame %t/z.so | FileCheck %s --check-prefix=FRAME
+# RUN: yaml2obj %t/zPL.yaml -o %t/zPL.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/zPL.o -o %t/zPL.so
+# RUN: llvm-readobj --relocations %t/zPL.so | FileCheck %s --check-prefix=RELOCS
+# RUN: llvm-dwarfdump --eh-frame %t/zPL.so | FileCheck %s --check-prefix=FRAME
+# RUN: yaml2obj %t/zR.yaml -o %t/zR.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/zR.o -o %t/zR.so
+# RUN: llvm-readobj --relocations %t/zR.so | FileCheck %s --check-prefix=RELOCS
+# RUN: llvm-dwarfdump --eh-frame %t/zR.so | FileCheck %s --check-prefix=FRAME
+# RUN: yaml2obj %t/zPLR.yaml -o %t/zPLR.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/zPLR.o -o %t/zPLR.so
+# RUN: llvm-readobj --relocations %t/zPLR.so | FileCheck %s --check-prefix=RELOCS
+# RUN: llvm-dwarfdump --eh-frame %t/zPLR.so | FileCheck %s --check-prefix=FRAME
+# RUN: yaml2obj %t/zS.yaml -o %t/zS.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/zS.o -o %t/zS.so
+# RUN: llvm-readobj --relocations %t/zS.so | FileCheck %s --check-prefix=RELOCS
+# RUN: llvm-dwarfdump --eh-frame %t/zS.so | FileCheck %s --check-prefix=FRAME
+# RUN: yaml2obj %t/empty2.yaml -o %t/empty2.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/empty.o %t/empty2.o -o %t/empty-dedup.so
+# RUN: llvm-dwarfdump --eh-frame %t/empty-dedup.so | FileCheck %s --check-prefix=DEDUP
+# RUN: yaml2obj %t/zPL2.yaml -o %t/zPL2.o
+# RUN: ld.lld -shared --eh-frame-hdr %t/zPL.o %t/zPL2.o -o %t/zPL-dedup.so
+# RUN: llvm-dwarfdump --eh-frame %t/zPL-dedup.so | FileCheck %s --check-prefix=DEDUP
+# DEDUP: CIE
+# DEDUP: FDE
+# DEDUP-NOT: CIE
+# DEDUP: FDE
+# DEDUP-NOT: CIE
+# RELOCS:      Relocations [
+# RELOCS-NEXT: ]
+# FRAME: CIE
+# FRAME: Augmentation: {{.*}}R
+# FRAME: DW_CFA_def_cfa: R3 +0
+# FRAME: FDE
+
+#--- empty.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '0c0000000000000003000178010c03001c00000014000000000000000000000004000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 24
+        Symbol: function
+        Type: R_LARCH_64
+Symbols:
+  - Name: function
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+
+#--- z.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '1400000000000000037a00017801000c03000000000000001c0000001c000000000000000000000004000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 32
+        Symbol: function
+        Type: R_LARCH_64
+Symbols:
+  - Name: function
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+
+#--- zPL.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '1c00000000000000037a504c000178010a000000000000000000000c0300000024000000240000000000000000000000040000000000000008000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 18
+        Symbol: personality
+        Type: R_LARCH_64
+      - Offset: 40
+        Symbol: function
+        Type: R_LARCH_64
+      - Offset: 57
+        Symbol: lsda
+        Type: R_LARCH_64
+Symbols:
+  - Name: function
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+
+#--- zR.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '1400000000000000037a520001780101000c0300000000001c0000001c000000000000000000000004000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 32
+        Symbol: function
+        Type: R_LARCH_64
+Symbols:
+  - Name: function
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+
+#--- zPLR.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '1c00000000000000037a504c52000178010b00000000000000000000000c030024000000240000000000000000000000040000000000000008000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 19
+        Symbol: personality
+        Type: R_LARCH_64
+      - Offset: 40
+        Symbol: function
+        Type: R_LARCH_64
+      - Offset: 57
+        Symbol: lsda
+        Type: R_LARCH_64
+Symbols:
+  - Name: function
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+
+#--- zS.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '1400000000000000037a5300017801000c030000000000001c0000001c000000000000000000000004000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 32
+        Symbol: function
+        Type: R_LARCH_64
+Symbols:
+  - Name: function
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+
+#--- empty2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '0c0000000000000003000178010c03001c00000014000000000000000000000004000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 24
+        Symbol: function2
+        Type: R_LARCH_64
+Symbols:
+  - Name: function2
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality2
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda2
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+
+#--- zPL2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_REL
+  Machine: EM_LOONGARCH
+  Flags: [ EF_LOONGARCH_ABI_DOUBLE_FLOAT ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 4
+    Content: '2000004c'
+  - Name: .gcc_except_table
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    Content: '0000000000000000'
+  - Name: .eh_frame
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 8
+    Content: '1c00000000000000037a504c000178010a000000000000000000000c0300000024000000240000000000000000000000040000000000000008000000000000000000000000000000'
+  - Name: .rela.eh_frame
+    Type: SHT_RELA
+    Info: .eh_frame
+    Relocations:
+      - Offset: 18
+        Symbol: personality
+        Type: R_LARCH_64
+      - Offset: 40
+        Symbol: function2
+        Type: R_LARCH_64
+      - Offset: 57
+        Symbol: lsda2
+        Type: R_LARCH_64
+Symbols:
+  - Name: function2
+    Section: .text
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+    Size: 4
+  - Name: personality
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]
+    Type: STT_FUNC
+  - Name: lsda2
+    Section: .gcc_except_table
+    Binding: STB_GLOBAL
+    Other: [ STV_HIDDEN ]

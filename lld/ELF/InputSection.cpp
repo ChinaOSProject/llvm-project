@@ -1420,7 +1420,7 @@ uint64_t EhInputSection::getParentOffset(uint64_t offset) const {
   }
   if (it[-1].outputOff == -1) // invalid piece
     return offset - it[-1].inputOff;
-  return it[-1].outputOff + (offset - it[-1].inputOff);
+  return it[-1].outputOff + it[-1].getOutputOffset(offset - it[-1].inputOff);
 }
 
 static size_t findNull(StringRef s, size_t entSize) {

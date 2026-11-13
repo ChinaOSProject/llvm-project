@@ -400,6 +400,56 @@ BssSection::BssSection(Ctx &ctx, StringRef name, uint64_t size,
 EhFrameSection::EhFrameSection(Ctx &ctx)
     : SyntheticSection(ctx, ".eh_frame", SHT_PROGBITS, SHF_ALLOC, 1) {}
 
+// Supply an explicit encoding for old CIEs whose FDE addresses are implicitly
+// absolute. Preserve the input coordinates used by relocation scanning while
+// accounting for inserted augmentation bytes in the output records.
+static void addFdeEncoding(CieRecord &rec, const CieEncodings &enc) {
+  EhSectionPiece &cie = *rec.cie;
+  auto data = cie.data();
+  SmallVector<std::pair<uint32_t, SmallVector<uint8_t, 2>>, 3> insertions;
+  bool hasZ = enc.augmentation.starts_with("z");
+  uint32_t stringEnd = 9 + enc.augmentation.size();
+  if (!hasZ)
+    insertions.push_back({9, {'z'}});
+  insertions.push_back({stringEnd, {'R'}});
+
+  uint32_t headerEnd = enc.augmentationSizeOffset;
+  SmallVector<uint8_t, 0> original(data);
+  if (hasZ) {
+    uint32_t oldSize = enc.augmentationDataOffset - headerEnd;
+    uint32_t end = enc.augmentationDataOffset + enc.augmentationSize;
+    if (enc.augmentationSize > data.size() - enc.augmentationDataOffset)
+      Fatal(cie.sec->getCtx()) << cie.sec << ": invalid CIE augmentation size";
+    SmallString<16> sizeBytes;
+    raw_svector_ostream os(sizeBytes);
+    encodeULEB128(enc.augmentationSize + 1, os, oldSize);
+    llvm::copy(ArrayRef<uint8_t>((const uint8_t *)sizeBytes.data(), oldSize),
+               original.begin() + headerEnd);
+    if (sizeBytes.size() > oldSize)
+      insertions.push_back(
+          {enc.augmentationDataOffset,
+           SmallVector<uint8_t, 2>(sizeBytes.begin() + oldSize, sizeBytes.end())});
+    insertions.push_back({end, {DW_EH_PE_pcrel | DW_EH_PE_sdata8}});
+  } else {
+    insertions.push_back(
+        {headerEnd, {1, DW_EH_PE_pcrel | DW_EH_PE_sdata8}});
+    rec.addedAugmentationSize = true;
+  }
+  llvm::stable_sort(insertions, [](const auto &a, const auto &b) {
+    return a.first < b.first;
+  });
+  uint32_t pos = 0;
+  for (const auto &insertion : insertions) {
+    uint32_t next = insertion.first;
+    rec.convertedCie.append(original.begin() + pos, original.begin() + next);
+    rec.convertedCie.append(insertion.second);
+    cie.insertedBytes.push_back({next, insertion.second.size()});
+    pos = next;
+  }
+  rec.convertedCie.append(original.begin() + pos, original.end());
+  rec.convertedCie.resize(cie.getOutputSize(), 0); // DW_CFA_nop padding.
+}
+
 // Search for an existing CIE record or create a new one.
 // CIE records from input object files are uniquified by their contents
 // and where their relocations point to.
@@ -429,6 +479,8 @@ CieRecord *EhFrameSection::addCie(EhSectionPiece &cie, ArrayRef<RelTy> rels) {
       return format == DW_EH_PE_absptr || format == DW_EH_PE_udata8 ||
              format == DW_EH_PE_sdata8;
     };
+    if (!encodings.fdeEncodingOffset && rec->convertedCie.empty())
+      addFdeEncoding(*rec, encodings);
     if (encodings.fdeEncodingOffset != 0 &&
         encodings.fdeEncodingOffset < cie.size &&
         !(encodings.fdeEncoding & DW_EH_PE_indirect) &&
@@ -586,17 +638,20 @@ void EhFrameSection::finalizeContents() {
   for (CieRecord *rec : cieRecords) {
     rec->cie->personalityPcRelativeOffset = rec->convertedPersonalityOffset;
     rec->cie->outputOff = off;
-    off += rec->cie->size;
+    off += rec->cie->getOutputSize();
 
     uint8_t fdeEncoding = rec->convertedLsdaEncodingOffset
                               ? getFdeEncoding(rec->cie)
                               : static_cast<uint8_t>(DW_EH_PE_absptr);
     for (EhSectionPiece *fde : rec->fdes) {
-      fde->fdePcRelative = rec->convertedEncodingOffset != 0;
+      fde->fdePcRelative = rec->convertedEncodingOffset != 0 ||
+                           !rec->convertedCie.empty();
+      if (rec->addedAugmentationSize)
+        fde->insertedBytes.push_back({24, 1});
       if (rec->convertedLsdaEncodingOffset)
         fde->lsdaPcRelativeOffset = getFdeLsdaOffset(fde, fdeEncoding);
       fde->outputOff = off;
-      off += fde->size;
+      off += fde->getOutputSize();
     }
   }
 
@@ -618,7 +673,7 @@ SmallVector<EhFrameSection::FdeData, 0> EhFrameSection::getFdeData() const {
 
   uint64_t va = getPartition(ctx).ehFrameHdr->getVA();
   for (CieRecord *rec : cieRecords) {
-    uint8_t enc = rec->convertedEncodingOffset
+    uint8_t enc = (rec->convertedEncodingOffset || !rec->convertedCie.empty())
                       ? DW_EH_PE_pcrel | DW_EH_PE_sdata8
                       : getFdeEncoding(rec->cie);
     for (EhSectionPiece *fde : rec->fdes) {
@@ -689,20 +744,34 @@ void EhFrameSection::writeTo(uint8_t *buf) {
   // Write CIE and FDE records.
   for (CieRecord *rec : cieRecords) {
     size_t cieOffset = rec->cie->outputOff;
-    writeCieFde(ctx, buf + cieOffset, rec->cie->data());
+    writeCieFde(ctx, buf + cieOffset,
+                rec->convertedCie.empty() ? rec->cie->data()
+                                          : rec->convertedCie);
     if (rec->convertedEncodingOffset)
       buf[cieOffset + rec->convertedEncodingOffset] =
           DW_EH_PE_pcrel | DW_EH_PE_sdata8;
     if (rec->convertedLsdaEncodingOffset)
-      buf[cieOffset + rec->convertedLsdaEncodingOffset] =
+      buf[cieOffset + rec->cie->getOutputOffset(
+                          rec->convertedLsdaEncodingOffset)] =
           rec->convertedLsdaEncoding;
     if (rec->convertedPersonalityEncodingOffset)
-      buf[cieOffset + rec->convertedPersonalityEncodingOffset] =
+      buf[cieOffset + rec->cie->getOutputOffset(
+                          rec->convertedPersonalityEncodingOffset)] =
           rec->convertedPersonalityEncoding;
 
     for (EhSectionPiece *fde : rec->fdes) {
       size_t off = fde->outputOff;
-      writeCieFde(ctx, buf + off, fde->data());
+      if (rec->addedAugmentationSize) {
+        auto data = fde->data();
+        memcpy(buf + off, data.data(), 24);
+        buf[off + 24] = 0; // Empty FDE augmentation data.
+        memcpy(buf + off + 25, data.data() + 24, data.size() - 24);
+        memset(buf + off + data.size() + 1, 0,
+               fde->getOutputSize() - data.size() - 1);
+        write32(ctx, buf + off, fde->getOutputSize() - 4);
+      } else {
+        writeCieFde(ctx, buf + off, fde->data());
+      }
 
       // FDE's second word should have the offset to an associated CIE.
       // Write it.

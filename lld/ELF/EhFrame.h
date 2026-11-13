@@ -23,6 +23,10 @@ struct CieEncodings {
   uint32_t lsdaEncodingOffset = 0;
   uint32_t personalityEncodingOffset = 0;
   uint32_t personalityOffset = 0;
+  llvm::StringRef augmentation;
+  uint32_t augmentationSizeOffset = 0;
+  uint32_t augmentationDataOffset = 0;
+  uint64_t augmentationSize = 0;
 };
 
 uint8_t getFdeEncoding(EhSectionPiece *p, CieEncodings *encodings = nullptr);
