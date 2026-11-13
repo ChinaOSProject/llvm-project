@@ -533,6 +533,12 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
         ("ld-linux-loongarch-" +
          tools::loongarch::getLoongArchABI(getDriver(), Args, Triple) + ".so.1")
             .str();
+    if (Loader == "ld-linux-loongarch-lp64d.so.1") {
+      std::string Root = computeSysRoot();
+      if (!getDriver().getVFS().exists(Root + "/lib64/" + Loader) &&
+          getDriver().getVFS().exists(Root + "/lib64/ld.so.1"))
+        Loader = "ld.so.1";
+    }
     break;
   }
   case llvm::Triple::m68k:
